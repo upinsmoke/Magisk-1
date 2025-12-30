@@ -1,6 +1,6 @@
-#include <mincrypt/sha.h>
 #include <base.hpp>
 
+#include "boot-rs.hpp"
 #include "magiskboot.hpp"
 #include "compress.hpp"
 
@@ -57,36 +57,9 @@ Supported actions:
     Search <hexpattern1> in <file>, and replace it with <hexpattern2>
 
   cpio <incpio> [commands...]
-    Do cpio commands to <incpio> (modifications are done in-place)
-    Each command is a single argument, add quotes for each command.
-    Supported commands:
-      exists ENTRY
-        Return 0 if ENTRY exists, else return 1
-      rm [-r] ENTRY
-        Remove ENTRY, specify [-r] to remove recursively
-      mkdir MODE ENTRY
-        Create directory ENTRY in permissions MODE
-      ln TARGET ENTRY
-        Create a symlink to TARGET with the name ENTRY
-      mv SOURCE DEST
-        Move SOURCE to DEST
-      add MODE ENTRY INFILE
-        Add INFILE as ENTRY in permissions MODE; replaces ENTRY if exists
-      extract [ENTRY OUT]
-        Extract ENTRY to OUT, or extract all entries to current directory
-      test
-        Test the cpio's status
-        Return value is 0 or bitwise or-ed of following values:
-        0x1:Magisk    0x2:unsupported    0x4:Sony
-      patch
-        Apply ramdisk patches
-        Configure with env variables: KEEPVERITY KEEPFORCEENCRYPT
-      backup ORIG
-        Create ramdisk backups from ORIG
-      restore
-        Restore ramdisk from ramdisk backup stored within incpio
-      sha1
-        Print stock boot SHA1 if previously backed up in ramdisk
+    Do cpio commands to <incpio> (modifications are done in-place).
+    Each command is a single argument; add quotes for each command.
+    See "cpio --help" for supported commands.
 
   dtb <file> <action> [args...]
     Do dtb related actions to <file>
@@ -160,9 +133,11 @@ int main(int argc, char *argv[]) {
         unlink(RECV_DTBO_FILE);
         unlink(DTB_FILE);
     } else if (argc > 2 && action == "sha1") {
-        uint8_t sha1[SHA_DIGEST_SIZE];
-        auto m = mmap_data(argv[2]);
-        SHA_hash(m.buf, m.sz, sha1);
+        uint8_t sha1[20];
+        {
+            mmap_data m(argv[2]);
+            sha1_hash(m, byte_data(sha1, sizeof(sha1)));
+        }
         for (uint8_t i : sha1)
             printf("%02x", i);
         printf("\n");
@@ -201,10 +176,9 @@ int main(int argc, char *argv[]) {
     } else if (argc > 2 && str_starts(action, "compress")) {
         compress(action[8] == '=' ? &action[9] : "gzip", argv[2], argv[3]);
     } else if (argc > 4 && action == "hexpatch") {
-        return hexpatch(argv[2], argv[3], argv[4]);
-    } else if (argc > 2 && action == "cpio"sv) {
-        if (cpio_commands(argc - 2, argv + 2))
-            usage(argv[0]);
+        return hexpatch(byte_view(argv[2]), byte_view(argv[3]), byte_view(argv[4])) ? 0 : 1;
+    } else if (argc > 2 && action == "cpio") {
+        return rust::cpio_commands(argc - 2, argv + 2) ? 0 : 1;
     } else if (argc > 3 && action == "dtb") {
         if (dtb_commands(argc - 2, argv + 2))
             usage(argv[0]);

@@ -13,7 +13,9 @@ void FirstStageInit::prepare() {
     restore_ramdisk_init();
     auto init = mmap_data("/init", true);
     // Redirect original init to magiskinit
-    init.patch({ make_pair(INIT_PATH, REDIR_PATH) });
+    for (size_t off : init.patch(INIT_PATH, REDIR_PATH)) {
+        LOGD("Patch @ %08zX [" INIT_PATH "] -> [" REDIR_PATH "]\n", off);
+    }
 }
 
 void LegacySARInit::first_stage_prep() {
@@ -21,9 +23,11 @@ void LegacySARInit::first_stage_prep() {
     int src = xopen("/init", O_RDONLY);
     int dest = xopen("/data/init", O_CREAT | O_WRONLY, 0);
     {
-        auto init = mmap_data("/init");
-        init.patch({ make_pair(INIT_PATH, REDIR_PATH) });
-        write(dest, init.buf, init.sz);
+        mmap_data init("/init");
+        for (size_t off : init.patch(INIT_PATH, REDIR_PATH)) {
+            LOGD("Patch @ %08zX [" INIT_PATH "] -> [" REDIR_PATH "]\n", off);
+        }
+        write(dest, init.buf(), init.sz());
         fclone_attr(src, dest);
         close(dest);
         close(src);

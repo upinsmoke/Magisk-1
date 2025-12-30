@@ -23,12 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    env:
-      NDK_CCACHE: sccache
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: true
-      CARGO_INCREMENTAL: 0
-
     steps:
       - name: Check out
         uses: actions/checkout@v3
@@ -48,7 +42,12 @@ jobs:
           python-version: "3.x"
 
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.3
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: sccache
+          key: ${{ runner.os }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}
+          max-size: 10000M
 
       - name: Cache Gradle dependencies
         uses: actions/cache@v3
@@ -104,7 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api: [23, 26, 28, 29, 33]
+        api: [23, 26, 28, 29, 34]
 
     steps:
       - name: Check out

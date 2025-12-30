@@ -2,21 +2,18 @@
 #include <memory>
 
 #include <libfdt.h>
-#include <mincrypt/sha.h>
-#include <mincrypt/sha256.h>
 #include <base.hpp>
 
+#include "boot-rs.hpp"
 #include "bootimg.hpp"
 #include "magiskboot.hpp"
 #include "compress.hpp"
-#include "boot-rs.hpp"
 
 using namespace std;
 
-uint32_t dyn_img_hdr::j32 = 0;
-uint64_t dyn_img_hdr::j64 = 0;
-
 #define PADDING 15
+#define SHA256_DIGEST_SIZE 32
+#define SHA_DIGEST_SIZE 20
 
 static void decompress(format_t type, int fd, const void *in, size_t size) {
     auto ptr = get_decoder(type, make_unique<fd_channel>(fd));
@@ -50,10 +47,10 @@ static size_t restore(int fd, const char *filename) {
     return size;
 }
 
-void dyn_img_hdr::print() {
+void dyn_img_hdr::print() const {
     uint32_t ver = header_version();
     fprintf(stderr, "%-*s [%u]\n", PADDING, "HEADER_VER", ver);
-    if (!is_vendor)
+    if (!is_vendor())
         fprintf(stderr, "%-*s [%u]\n", PADDING, "KERNEL_SZ", kernel_size());
     fprintf(stderr, "%-*s [%u]\n", PADDING, "RAMDISK_SZ", ramdisk_size());
     if (ver < 3)
@@ -62,7 +59,7 @@ void dyn_img_hdr::print() {
         fprintf(stderr, "%-*s [%u]\n", PADDING, "EXTRA_SZ", extra_size());
     if (ver == 1 || ver == 2)
         fprintf(stderr, "%-*s [%u]\n", PADDING, "RECOV_DTBO_SZ", recovery_dtbo_size());
-    if (ver == 2 || is_vendor)
+    if (ver == 2 || is_vendor())
         fprintf(stderr, "%-*s [%u]\n", PADDING, "DTB_SZ", dtb_size());
 
     if (uint32_t os_ver = os_version()) {
@@ -81,12 +78,12 @@ void dyn_img_hdr::print() {
     }
 
     fprintf(stderr, "%-*s [%u]\n", PADDING, "PAGESIZE", page_size());
-    if (char *n = name()) {
+    if (const char *n = name()) {
         fprintf(stderr, "%-*s [%s]\n", PADDING, "NAME", n);
     }
     fprintf(stderr, "%-*s [%.*s%.*s]\n", PADDING, "CMDLINE",
             BOOT_ARGS_SIZE, cmdline(), BOOT_EXTRA_ARGS_SIZE, extra_cmdline());
-    if (char *checksum = id()) {
+    if (const char *checksum = id()) {
         fprintf(stderr, "%-*s [", PADDING, "CHECKSUM");
         for (int i = 0; i < SHA256_DIGEST_SIZE; ++i)
             fprintf(stderr, "%02hhx", checksum[i]);
@@ -94,7 +91,7 @@ void dyn_img_hdr::print() {
     }
 }
 
-void dyn_img_hdr::dump_hdr_file() {
+void dyn_img_hdr::dump_hdr_file() const {
     FILE *fp = xfopen(HEADER_FILE, "w");
     if (name())
         fprintf(fp, "name=%s\n", name());
@@ -151,8 +148,8 @@ void dyn_img_hdr::load_hdr_file() {
 
 boot_img::boot_img(const char *image) : map(image) {
     fprintf(stderr, "Parsing boot image: [%s]\n", image);
-    for (const uint8_t *addr = map.buf; addr < map.buf + map.sz; ++addr) {
-        format_t fmt = check_fmt(addr, map.sz);
+    for (const uint8_t *addr = map.buf(); addr < map.buf() + map.sz(); ++addr) {
+        format_t fmt = check_fmt(addr, map.sz());
         switch (fmt) {
         case CHROMEOS:
             // chromeos require external signing
@@ -321,7 +318,7 @@ if (hdr->name##_size()) {                                           \
 }
 
 void boot_img::parse_image(const uint8_t *addr, format_t type) {
-    hdr = create_hdr(addr, type);
+    auto hdr = create_hdr(addr, type);
 
     if (char *id = hdr->id()) {
         for (int i = SHA_DIGEST_SIZE + 4; i < SHA256_DIGEST_SIZE; ++i) {
@@ -401,7 +398,7 @@ void boot_img::parse_image(const uint8_t *addr, format_t type) {
         fprintf(stderr, "%-*s [%s]\n", PADDING, "KERNEL_FMT", fmt2name[k_fmt]);
     }
     if (auto size = hdr->ramdisk_size()) {
-        if (hdr->is_vendor && hdr->header_version() >= 4) {
+        if (hdr->is_vendor() && hdr->header_version() >= 4) {
             // v4 vendor boot contains multiple ramdisks
             // Do not try to mess with it for now
             r_fmt = UNKNOWN;
@@ -425,9 +422,9 @@ void boot_img::parse_image(const uint8_t *addr, format_t type) {
         fprintf(stderr, "%-*s [%s]\n", PADDING, "EXTRA_FMT", fmt2name[e_fmt]);
     }
 
-    if (addr + off < map.buf + map.sz) {
+    if (addr + off < map.buf() + map.sz()) {
         tail = addr + off;
-        tail_size = map.buf + map.sz - tail;
+        tail_size = map.buf() + map.sz() - tail;
 
         // Check special flags
         if (tail_size >= 16 && BUFFER_MATCH(tail, SEANDROID_MAGIC)) {
@@ -451,21 +448,23 @@ void boot_img::parse_image(const uint8_t *addr, format_t type) {
             }
         }
     }
+
+    this->hdr = hdr;
 }
 
 int split_image_dtb(const char *filename) {
-    auto img = mmap_data(filename);
+    mmap_data img(filename);
 
-    if (int off = find_dtb_offset(img.buf, img.sz); off > 0) {
-        format_t fmt = check_fmt_lg(img.buf, img.sz);
+    if (int off = find_dtb_offset(img.buf(), img.sz()); off > 0) {
+        format_t fmt = check_fmt_lg(img.buf(), img.sz());
         if (COMPRESSED(fmt)) {
             int fd = creat(KERNEL_FILE, 0644);
-            decompress(fmt, fd, img.buf, off);
+            decompress(fmt, fd, img.buf(), off);
             close(fd);
         } else {
-            dump(img.buf, off, KERNEL_FILE);
+            dump(img.buf(), off, KERNEL_FILE);
         }
-        dump(img.buf + off, img.sz - off, KER_DTB_FILE);
+        dump(img.buf() + off, img.sz() - off, KER_DTB_FILE);
         return 0;
     } else {
         fprintf(stderr, "Cannot find DTB in %s\n", filename);
@@ -474,7 +473,7 @@ int split_image_dtb(const char *filename) {
 }
 
 int unpack(const char *image, bool skip_decomp, bool hdr) {
-    boot_img boot(image);
+    const boot_img boot(image);
 
     if (hdr)
         boot.hdr->dump_hdr_file();
@@ -569,11 +568,11 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
         // Skip DHTB header
         write_zero(fd, sizeof(dhtb_hdr));
     } else if (boot.flags[BLOB_FLAG]) {
-        xwrite(fd, boot.map.buf, sizeof(blob_hdr));
+        xwrite(fd, boot.map.buf(), sizeof(blob_hdr));
     } else if (boot.flags[NOOKHD_FLAG]) {
-        xwrite(fd, boot.map.buf, NOOKHD_PRE_HEADER_SZ);
+        xwrite(fd, boot.map.buf(), NOOKHD_PRE_HEADER_SZ);
     } else if (boot.flags[ACCLAIM_FLAG]) {
-        xwrite(fd, boot.map.buf, ACCLAIM_PRE_HEADER_SZ);
+        xwrite(fd, boot.map.buf(), ACCLAIM_PRE_HEADER_SZ);
     }
 
     // Copy raw header
@@ -591,13 +590,13 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
         xwrite(fd, boot.z_hdr, boot.z_info.hdr_sz);
     }
     if (access(KERNEL_FILE, R_OK) == 0) {
-        auto m = mmap_data(KERNEL_FILE);
-        if (!skip_comp && !COMPRESSED_ANY(check_fmt(m.buf, m.sz)) && COMPRESSED(boot.k_fmt)) {
+        mmap_data m(KERNEL_FILE);
+        if (!skip_comp && !COMPRESSED_ANY(check_fmt(m.buf(), m.sz())) && COMPRESSED(boot.k_fmt)) {
             // Always use zopfli for zImage compression
             auto fmt = (boot.flags[ZIMAGE_KERNEL] && boot.k_fmt == GZIP) ? ZOPFLI : boot.k_fmt;
-            hdr->kernel_size() = compress(fmt, fd, m.buf, m.sz);
+            hdr->kernel_size() = compress(fmt, fd, m.buf(), m.sz());
         } else {
-            hdr->kernel_size() = xwrite(fd, m.buf, m.sz);
+            hdr->kernel_size() = xwrite(fd, m.buf(), m.sz());
         }
 
         if (boot.flags[ZIMAGE_KERNEL]) {
@@ -608,7 +607,7 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
             } else if (!skip_comp) {
                 // Pad zeros to make sure the zImage file size does not change
                 // Also ensure the last 4 bytes are the uncompressed vmlinux size
-                uint32_t sz = m.sz;
+                uint32_t sz = m.sz();
                 write_zero(fd, boot.hdr->kernel_size() - hdr->kernel_size() - sizeof(sz));
                 xwrite(fd, &sz, sizeof(sz));
             }
@@ -638,19 +637,19 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
         xwrite(fd, boot.r_hdr, sizeof(mtk_hdr));
     }
     if (access(RAMDISK_FILE, R_OK) == 0) {
-        auto m = mmap_data(RAMDISK_FILE);
+        mmap_data m(RAMDISK_FILE);
         auto r_fmt = boot.r_fmt;
-        if (!skip_comp && !hdr->is_vendor && hdr->header_version() == 4 && r_fmt != LZ4_LEGACY) {
+        if (!skip_comp && !hdr->is_vendor() && hdr->header_version() == 4 && r_fmt != LZ4_LEGACY) {
             // A v4 boot image ramdisk will have to be merged with other vendor ramdisks,
             // and they have to use the exact same compression method. v4 GKIs are required to
             // use lz4 (legacy), so hardcode the format here.
             fprintf(stderr, "RAMDISK_FMT: [%s] -> [%s]\n", fmt2name[r_fmt], fmt2name[LZ4_LEGACY]);
             r_fmt = LZ4_LEGACY;
         }
-        if (!skip_comp && !COMPRESSED_ANY(check_fmt(m.buf, m.sz)) && COMPRESSED(r_fmt)) {
-            hdr->ramdisk_size() = compress(r_fmt, fd, m.buf, m.sz);
+        if (!skip_comp && !COMPRESSED_ANY(check_fmt(m.buf(), m.sz())) && COMPRESSED(r_fmt)) {
+            hdr->ramdisk_size() = compress(r_fmt, fd, m.buf(), m.sz());
         } else {
-            hdr->ramdisk_size() = xwrite(fd, m.buf, m.sz);
+            hdr->ramdisk_size() = xwrite(fd, m.buf(), m.sz());
         }
         file_align();
     }
@@ -665,11 +664,11 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
     // extra
     off.extra = lseek(fd, 0, SEEK_CUR);
     if (access(EXTRA_FILE, R_OK) == 0) {
-        auto m = mmap_data(EXTRA_FILE);
-        if (!skip_comp && !COMPRESSED_ANY(check_fmt(m.buf, m.sz)) && COMPRESSED(boot.e_fmt)) {
-            hdr->extra_size() = compress(boot.e_fmt, fd, m.buf, m.sz);
+        mmap_data m(EXTRA_FILE);
+        if (!skip_comp && !COMPRESSED_ANY(check_fmt(m.buf(), m.sz())) && COMPRESSED(boot.e_fmt)) {
+            hdr->extra_size() = compress(boot.e_fmt, fd, m.buf(), m.sz());
         } else {
-            hdr->extra_size() = xwrite(fd, m.buf, m.sz);
+            hdr->extra_size() = xwrite(fd, m.buf(), m.sz());
         }
         file_align();
     }
@@ -720,8 +719,8 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
     // Pad image to original size if not chromeos (as it requires post processing)
     if (!boot.flags[CHROMEOS_FLAG]) {
         off_t current = lseek(fd, 0, SEEK_CUR);
-        if (current < boot.map.sz) {
-            write_zero(fd, boot.map.sz - current);
+        if (current < boot.map.sz()) {
+            write_zero(fd, boot.map.sz() - current);
         }
     }
 
@@ -732,16 +731,16 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
      ******************/
 
     // Map output image as rw
-    auto out = mmap_data(out_img, true);
+    mmap_data out(out_img, true);
 
     // MTK headers
     if (boot.flags[MTK_KERNEL]) {
-        auto m_hdr = reinterpret_cast<mtk_hdr *>(out.buf + off.kernel);
+        auto m_hdr = reinterpret_cast<mtk_hdr *>(out.buf() + off.kernel);
         m_hdr->size = hdr->kernel_size();
         hdr->kernel_size() += sizeof(mtk_hdr);
     }
     if (boot.flags[MTK_RAMDISK]) {
-        auto m_hdr = reinterpret_cast<mtk_hdr *>(out.buf + off.ramdisk);
+        auto m_hdr = reinterpret_cast<mtk_hdr *>(out.buf() + off.ramdisk);
         m_hdr->size = hdr->ramdisk_size();
         hdr->ramdisk_size() += sizeof(mtk_hdr);
     }
@@ -751,35 +750,34 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
 
     // Update checksum
     if (char *id = hdr->id()) {
-        HASH_CTX ctx;
-        boot.flags[SHA256_FLAG] ? SHA256_init(&ctx) : SHA_init(&ctx);
+        auto ctx = get_sha(!boot.flags[SHA256_FLAG]);
         uint32_t size = hdr->kernel_size();
-        HASH_update(&ctx, out.buf + off.kernel, size);
-        HASH_update(&ctx, &size, sizeof(size));
+        ctx->update(byte_view(out.buf() + off.kernel, size));
+        ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->ramdisk_size();
-        HASH_update(&ctx, out.buf + off.ramdisk, size);
-        HASH_update(&ctx, &size, sizeof(size));
+        ctx->update(byte_view(out.buf() + off.ramdisk, size));
+        ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->second_size();
-        HASH_update(&ctx, out.buf + off.second, size);
-        HASH_update(&ctx, &size, sizeof(size));
+        ctx->update(byte_view(out.buf() + off.second, size));
+        ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->extra_size();
         if (size) {
-            HASH_update(&ctx, out.buf + off.extra, size);
-            HASH_update(&ctx, &size, sizeof(size));
+            ctx->update(byte_view(out.buf() + off.extra, size));
+            ctx->update(byte_view(&size, sizeof(size)));
         }
         uint32_t ver = hdr->header_version();
         if (ver == 1 || ver == 2) {
             size = hdr->recovery_dtbo_size();
-            HASH_update(&ctx, out.buf + hdr->recovery_dtbo_offset(), size);
-            HASH_update(&ctx, &size, sizeof(size));
+            ctx->update(byte_view(out.buf() + hdr->recovery_dtbo_offset(), size));
+            ctx->update(byte_view(&size, sizeof(size)));
         }
         if (ver == 2) {
             size = hdr->dtb_size();
-            HASH_update(&ctx, out.buf + off.dtb, size);
-            HASH_update(&ctx, &size, sizeof(size));
+            ctx->update(byte_view(out.buf() + off.dtb, size));
+            ctx->update(byte_view(&size, sizeof(size)));
         }
         memset(id, 0, BOOT_ID_SIZE);
-        memcpy(id, HASH_final(&ctx), boot.flags[SHA256_FLAG] ? SHA256_DIGEST_SIZE : SHA_DIGEST_SIZE);
+        ctx->finalize_into(byte_data(id, ctx->output_size()));
     }
 
     // Print new header info
@@ -788,15 +786,15 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
     // Copy main header
     if (boot.flags[AMONET_FLAG]) {
         auto real_hdr_sz = std::min(hdr->hdr_space() - AMONET_MICROLOADER_SZ, hdr->hdr_size());
-        memcpy(out.buf + off.header + AMONET_MICROLOADER_SZ, hdr->raw_hdr(), real_hdr_sz);
+        memcpy(out.buf() + off.header + AMONET_MICROLOADER_SZ, hdr->raw_hdr(), real_hdr_sz);
     } else {
-        memcpy(out.buf + off.header, hdr->raw_hdr(), hdr->hdr_size());
+        memcpy(out.buf() + off.header, hdr->raw_hdr(), hdr->hdr_size());
     }
 
     if (boot.flags[AVB_FLAG]) {
         // Copy and patch AVB structures
-        auto footer = reinterpret_cast<AvbFooter*>(out.buf + out.sz - sizeof(AvbFooter));
-        auto vbmeta = reinterpret_cast<AvbVBMetaImageHeader*>(out.buf + off.vbmeta);
+        auto footer = reinterpret_cast<AvbFooter*>(out.buf() + out.sz() - sizeof(AvbFooter));
+        auto vbmeta = reinterpret_cast<AvbVBMetaImageHeader*>(out.buf() + off.vbmeta);
         memcpy(footer, boot.avb_footer, sizeof(AvbFooter));
         footer->original_image_size = __builtin_bswap64(off.total);
         footer->vbmeta_offset = __builtin_bswap64(off.vbmeta);
@@ -807,13 +805,14 @@ void repack(const char *src_img, const char *out_img, bool skip_comp) {
 
     if (boot.flags[DHTB_FLAG]) {
         // DHTB header
-        auto d_hdr = reinterpret_cast<dhtb_hdr *>(out.buf);
+        auto d_hdr = reinterpret_cast<dhtb_hdr *>(out.buf());
         memcpy(d_hdr, DHTB_MAGIC, 8);
         d_hdr->size = off.total - sizeof(dhtb_hdr);
-        SHA256_hash(out.buf + sizeof(dhtb_hdr), d_hdr->size, d_hdr->checksum);
+        sha256_hash(byte_view(out.buf() + sizeof(dhtb_hdr), d_hdr->size),
+                    byte_data(d_hdr->checksum, 32));
     } else if (boot.flags[BLOB_FLAG]) {
         // Blob header
-        auto b_hdr = reinterpret_cast<blob_hdr *>(out.buf);
+        auto b_hdr = reinterpret_cast<blob_hdr *>(out.buf());
         b_hdr->size = off.total - sizeof(blob_hdr);
     }
 }

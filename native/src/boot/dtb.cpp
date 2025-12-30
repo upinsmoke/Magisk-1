@@ -8,6 +8,7 @@
 #include "magiskboot.hpp"
 #include "dtb.hpp"
 #include "format.hpp"
+#include "boot-rs.hpp"
 
 using namespace std;
 
@@ -95,9 +96,9 @@ static int find_fstab(const void *fdt, int node = 0) {
 
 template<typename Func>
 static void for_each_fdt(const char *file, bool rw, Func fn) {
-    auto m = mmap_data(file, rw);
-    uint8_t *end = m.buf + m.sz;
-    for (uint8_t *fdt = m.buf; fdt < end;) {
+    mmap_data m(file, rw);
+    uint8_t *end = m.buf() + m.sz();
+    for (uint8_t *fdt = m.buf(); fdt < end;) {
         fdt = static_cast<uint8_t*>(memmem(fdt, end - fdt, DTB_MAGIC, sizeof(fdt32_t)));
         if (fdt == nullptr)
             break;
@@ -150,7 +151,8 @@ static bool dtb_patch(const char *file) {
                 fdt_for_each_subnode(node, fdt, fstab) {
                     int len;
                     char *value = (char *) fdt_getprop(fdt, node, "fsmgr_flags", &len);
-                    patched |= patch_verity(value, len) != len;
+                    byte_data data(value, len);
+                    patched |= (patch_verity(data) != len);
                 }
             }
         }
@@ -221,12 +223,12 @@ static bool fdt_patch(void *fdt) {
         const char *name = fdt_get_name(fdt, node, nullptr);
         // Force remove AVB for 2SI since it may bootloop some devices
         int len;
-        auto value = (const char *) fdt_getprop(fdt, node, "fsmgr_flags", &len);
-        string copy(value, len);
-        uint32_t new_len = patch_verity(copy.data(), len);
-        if (new_len != len) {
+        const void *value = fdt_getprop(fdt, node, "fsmgr_flags", &len);
+        heap_data copy = byte_view(value, len).clone();
+        auto patched_sz = patch_verity(copy);
+        if (patched_sz != len) {
             modified = true;
-            fdt_setprop(fdt, node, "fsmgr_flags", copy.data(), new_len);
+            fdt_setprop(fdt, node, "fsmgr_flags", copy.buf(), patched_sz);
         }
         if (name == "system"sv) {
             fprintf(stderr, "Setting [mnt_point] to [/system_root]\n");
@@ -291,8 +293,7 @@ static bool dt_table_patch(const Header *hdr, const char *out) {
     total_size += xwrite(fd, buf, dtb_map.begin()->first);
 
     // mmap rw to patch table values retroactively
-    auto mmap_sz = lseek(fd, 0, SEEK_CUR);
-    auto addr = (uint8_t *) xmmap(nullptr, mmap_sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    mmap_data m(fd, lseek(fd, 0, SEEK_CUR), true);
 
     // Guess alignment using gcd
     uint32_t align = 1;
@@ -319,17 +320,16 @@ static bool dt_table_patch(const Header *hdr, const char *out) {
 
     // Patch headers
     if constexpr (is_aosp) {
-        auto hdr_rw = reinterpret_cast<Header *>(addr);
+        auto hdr_rw = reinterpret_cast<Header *>(m.buf());
         hdr_rw->total_size = le_to_be(total_size);
     }
-    auto tables_rw = reinterpret_cast<Table *>(addr + sizeof(Header));
+    auto tables_rw = reinterpret_cast<Table *>(m.buf() + sizeof(Header));
     for (int i = 0; i < num_dtb; ++i) {
         auto &blob = dtb_map[be_to_le(tables_rw[i].offset)];
         tables_rw[i].offset = le_to_be(blob.offset);
         tables_rw[i].len = le_to_be(blob.len);
     }
 
-    munmap(addr, mmap_sz);
     close(fd);
 
     return true;

@@ -15,7 +15,7 @@ static int fmt_and_log_with_rs(LogLevel level, const char *fmt, va_list ap) {
     buf[0] = '\0';
     // Fortify logs when a fatal error occurs. Do not run through fortify again
     int len = std::min(__call_bypassing_fortify(vsnprintf)(buf, sz, fmt, ap), sz - 1);
-    log_with_rs(level, u8_slice(buf, len));
+    log_with_rs(level, byte_view(buf, len));
     return len;
 }
 
@@ -33,7 +33,7 @@ extern "C" int magisk_log_print(int prio, const char *tag, const char *fmt, ...)
         level = LogLevel::Warn;
         break;
     case ANDROID_LOG_ERROR:
-        level = LogLevel::Error;
+        level = LogLevel::ErrorCxx;
         break;
     default:
         return 0;
@@ -70,9 +70,9 @@ void LOGD(const char *fmt, ...) {}
 #endif
 void LOGI(const char *fmt, ...) { LOG_BODY(Info) }
 void LOGW(const char *fmt, ...) { LOG_BODY(Warn) }
-void LOGE(const char *fmt, ...) { LOG_BODY(Error) }
+void LOGE(const char *fmt, ...) { LOG_BODY(ErrorCxx) }
 
 // Export raw symbol to fortify compat
 extern "C" void __vloge(const char* fmt, va_list ap) {
-    fmt_and_log_with_rs(LogLevel::Error, fmt, ap);
+    fmt_and_log_with_rs(LogLevel::ErrorCxx, fmt, ap);
 }

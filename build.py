@@ -59,7 +59,14 @@ if not sys.version_info >= (3, 8):
 if "ANDROID_SDK_ROOT" not in os.environ:
     error("Please set Android SDK path to environment variable ANDROID_SDK_ROOT!")
 
+if shutil.which("sccache") is not None:
+    os.environ["RUSTC_WRAPPER"] = "sccache"
+    os.environ["NDK_CCACHE"] = "sccache"
+    os.environ["CARGO_INCREMENTAL"] = "0"
+
 cpu_count = multiprocessing.cpu_count()
+os_name = platform.system().lower()
+
 archs = ["armeabi-v7a", "x86", "arm64-v8a", "x86_64"]
 triples = [
     "armv7a-linux-androideabi",
@@ -76,6 +83,9 @@ ndk_root = op.join(sdk_path, "ndk")
 ndk_path = op.join(ndk_root, "magisk")
 ndk_build = op.join(ndk_path, "ndk-build")
 rust_bin = op.join(ndk_path, "toolchains", "rust", "bin")
+llvm_bin = op.join(
+    ndk_path, "toolchains", "llvm", "prebuilt", f"{os_name}-x86_64", "bin"
+)
 cargo = op.join(rust_bin, "cargo" + EXE_EXT)
 gradlew = op.join(".", "gradlew" + (".bat" if is_windows else ""))
 adb_path = op.join(sdk_path, "platform-tools", "adb" + EXE_EXT)
@@ -107,21 +117,23 @@ def rm(file):
     try:
         os.remove(file)
         vprint(f"rm {file}")
-    except OSError as e:
-        if e.errno != errno.ENOENT:
-            raise
+    except FileNotFoundError as e:
+        pass
 
 
 def rm_on_error(func, path, _):
-    # Remove a read-only file on Windows will get "WindowsError: [Error 5] Access is denied"
-    # Clear the "read-only" and retry
-    os.chmod(path, stat.S_IWRITE)
-    os.unlink(path)
+    # Removing a read-only file on Windows will get "WindowsError: [Error 5] Access is denied"
+    # Clear the "read-only" bit and retry
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        os.unlink(path)
+    except FileNotFoundError as e:
+        pass
 
 
 def rm_rf(path):
     vprint(f"rm -rf {path}")
-    shutil.rmtree(path, ignore_errors=True, onerror=rm_on_error)
+    shutil.rmtree(path, ignore_errors=False, onerror=rm_on_error)
 
 
 def mkdir(path, mode=0o755):
@@ -237,6 +249,16 @@ def run_ndk_build(flags):
             mv(source, target)
 
 
+def run_cargo(cmds, triple="aarch64-linux-android"):
+    env = os.environ.copy()
+    env["PATH"] = f'{rust_bin}{os.pathsep}{env["PATH"]}'
+    env["CARGO_BUILD_RUSTC"] = op.join(rust_bin, "rustc" + EXE_EXT)
+    env["RUSTFLAGS"] = "-Clinker-plugin-lto"
+    env["TARGET_CC"] = op.join(llvm_bin, "clang" + EXE_EXT)
+    env["TARGET_CFLAGS"] = f"--target={triple}23"
+    return execv([cargo, *cmds], env)
+
+
 def run_cargo_build(args):
     os.chdir(op.join("native", "src"))
     native_out = op.join("..", "out")
@@ -246,11 +268,8 @@ def run_cargo_build(args):
     if "resetprop" in args.target:
         targets.add("magisk")
 
-    env = os.environ.copy()
-    env["CARGO_BUILD_RUSTC"] = op.join(rust_bin, "rustc" + EXE_EXT)
-
     # Start building the actual build commands
-    cmds = [cargo, "build"]
+    cmds = ["build"]
     for target in targets:
         cmds.append("-p")
         cmds.append(target)
@@ -261,18 +280,15 @@ def run_cargo_build(args):
     if not args.verbose:
         cmds.append("-q")
 
-    os_name = platform.system().lower()
-    llvm_bin = op.join(
-        ndk_path, "toolchains", "llvm", "prebuilt", f"{os_name}-x86_64", "bin"
-    )
-    env["TARGET_CC"] = op.join(llvm_bin, "clang" + EXE_EXT)
-    env["RUSTFLAGS"] = "-Clinker-plugin-lto"
+    cmds.append("--target")
+    cmds.append("")
+
     for arch, triple in zip(archs, triples):
-        env["TARGET_CFLAGS"] = f"--target={triple}23"
         rust_triple = (
             "thumbv7neon-linux-androideabi" if triple.startswith("armv7") else triple
         )
-        proc = execv([*cmds, "--target", rust_triple], env)
+        cmds[-1] = rust_triple
+        proc = run_cargo(cmds, triple)
         if proc.returncode != 0:
             error("Build binary failed!")
 
@@ -283,6 +299,16 @@ def run_cargo_build(args):
             target = op.join(arch_out, f"lib{tgt}-rs.a")
             mv(source, target)
 
+    os.chdir(op.join("..", ".."))
+
+
+def run_cargo_cmd(args):
+    global STDOUT
+    STDOUT = None
+    if len(args.commands) >= 1 and args.commands[0] == "--":
+        args.commands = args.commands[1:]
+    os.chdir(op.join("native", "src"))
+    run_cargo(args.commands)
     os.chdir(op.join("..", ".."))
 
 
@@ -413,15 +439,16 @@ def find_jdk():
         if not op.exists(jbr):
             jbr = op.join(studio, "Contents", "jbr", "Contents", "Home", "bin")
         if op.exists(jbr):
-            env["PATH"] = f'{jbr}:{env["PATH"]}'
+            env["PATH"] = f'{jbr}{os.pathsep}{env["PATH"]}'
 
     no_jdk = False
     try:
         proc = subprocess.run(
-            ["javac", "-version"],
+            "javac -version",
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=env,
+            shell=True,
         )
         no_jdk = proc.returncode != 0
     except FileNotFoundError:
@@ -479,42 +506,50 @@ def build_stub(args):
 
 
 def cleanup(args):
-    support_targets = {"native", "java"}
+    support_targets = {"native", "cpp", "rust", "java"}
     if args.target:
         args.target = set(args.target) & support_targets
+        if "native" in args.target:
+            args.target.add("cpp")
+            args.target.add("rust")
     else:
         args.target = support_targets
 
-    if "native" in args.target:
-        header("* Cleaning native")
+    if "cpp" in args.target:
+        header("* Cleaning C++")
         rm_rf(op.join("native", "libs"))
         rm_rf(op.join("native", "obj"))
         rm_rf(op.join("native", "out"))
+
+    if "rust" in args.target:
+        header("* Cleaning Rust")
         rm_rf(op.join("native", "src", "target"))
-        rm(op.join("native", "src", "boot", "update_metadata.rs"))
+        rm(op.join("native", "src", "boot", "proto", "mod.rs"))
+        rm(op.join("native", "src", "boot", "proto", "update_metadata.rs"))
         for rs_gen in glob.glob("native/**/*-rs.*pp", recursive=True):
             rm(rs_gen)
 
     if "java" in args.target:
         header("* Cleaning java")
-        execv([gradlew, "app:clean", "app:shared:clean", "stub:clean"])
+        execv([gradlew, "app:clean", "app:shared:clean", "stub:clean"], env=find_jdk())
         rm_rf(op.join("app", "src", "debug"))
         rm_rf(op.join("app", "src", "release"))
 
 
 def setup_ndk(args):
-    os_name = platform.system().lower()
     ndk_ver = config["ondkVersion"]
-    url = f"https://github.com/topjohnwu/ondk/releases/download/{ndk_ver}/ondk-{ndk_ver}-{os_name}.tar.gz"
+    url = f"https://github.com/topjohnwu/ondk/releases/download/{ndk_ver}/ondk-{ndk_ver}-{os_name}.tar.xz"
     ndk_archive = url.split("/")[-1]
+    ondk_path = op.join(ndk_root, f"ondk-{ndk_ver}")
 
     header(f"* Downloading and extracting {ndk_archive}")
+    rm_rf(ondk_path)
     with urllib.request.urlopen(url) as response:
-        with tarfile.open(mode="r|gz", fileobj=response) as tar:
+        with tarfile.open(mode="r|xz", fileobj=response) as tar:
             tar.extractall(ndk_root)
 
     rm_rf(ndk_path)
-    mv(op.join(ndk_root, f"ondk-{ndk_ver}"), ndk_path)
+    mv(ondk_path, ndk_path)
 
     header("* Patching static libs")
     for target in ["arm-linux-androideabi", "i686-linux-android"]:
@@ -644,6 +679,10 @@ binary_parser.add_argument(
 )
 binary_parser.set_defaults(func=build_binary)
 
+cargo_parser = subparsers.add_parser("cargo", help="run cargo with proper environment")
+cargo_parser.add_argument("commands", nargs=argparse.REMAINDER)
+cargo_parser.set_defaults(func=run_cargo_cmd)
+
 app_parser = subparsers.add_parser("app", help="build the Magisk app")
 app_parser.set_defaults(func=build_app)
 
@@ -665,7 +704,7 @@ avd_patch_parser.set_defaults(func=patch_avd_ramdisk)
 
 clean_parser = subparsers.add_parser("clean", help="cleanup")
 clean_parser.add_argument(
-    "target", nargs="*", help="native, java, or empty to clean both"
+    "target", nargs="*", help="native, cpp, rust, java, or empty to clean all"
 )
 clean_parser.set_defaults(func=cleanup)
 
