@@ -473,10 +473,7 @@ abstract class MagiskInstallImpl protected constructor(
             return false
         }
 
-        // Fix up binaries
         srcBoot.delete()
-        "cp_readlink $installDir".sh()
-
         return true
     }
 
